@@ -1,4 +1,5 @@
 from datetime import datetime
+import atexit
 import json
 import math
 from art.utils.old_benchmarking.calculate_step_metrics import calculate_step_std_dev
@@ -12,13 +13,43 @@ from mp_actors import move_to_child_process
 import numpy as np
 import os
 import polars as pl
+import signal
 import subprocess
+import sys
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from tqdm import auto as tqdm
 from typing import AsyncIterator, cast
 import wandb
 from wandb.sdk.wandb_run import Run
+
+# Track all backend instances to ensure cleanup on exit and signals
+_backend_instances = []
+
+# Function to clean up all backends on exit
+def _cleanup_all_backends():
+    for backend in _backend_instances:
+        if hasattr(backend, "_cleanup_sync"):
+            try:
+                backend._cleanup_sync()
+            except Exception:
+                pass
+
+# Register cleanup on normal exit
+atexit.register(_cleanup_all_backends)
+
+# Set up signal handlers for SIGINT (Ctrl+C) and SIGTERM
+def _signal_handler(signum, frame):
+    print(f"\nReceived signal {signum}, cleaning up...")
+    _cleanup_all_backends()
+    # Re-raise the signal to allow normal Python signal handling to continue
+    # (this ensures the default handler can still terminate the process)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+# Register signal handlers
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, _signal_handler)
 
 from .. import dev
 from ..backend import Backend
@@ -62,6 +93,10 @@ class LocalBackend(Backend):
         self._services: dict[str, ModelService] = {}
         self._tokenizers: dict[str, "PreTrainedTokenizerBase"] = {}
         self._wandb_runs: dict[str, Run] = {}
+        
+        # Register this instance for global cleanup
+        global _backend_instances
+        _backend_instances.append(self)
 
     async def register(
         self,
@@ -417,27 +452,48 @@ class LocalBackend(Backend):
         self._services.clear()
         self._wandb_runs.clear()
     
-    def __del__(self) -> None:
+    def _cleanup_sync(self) -> None:
         """
-        Destructor that ensures cleanup happens automatically when the object is garbage collected.
-        
-        This helps prevent hanging when scripts finish without explicitly calling down().
+        Synchronous cleanup method that can be called from signal handlers or at exit.
         """
-        # Need to run sync cleanup since we can't await in __del__
+        print("Performing synchronous cleanup of LocalBackend...")
+        # Cancel OpenAI server tasks
         for service in self._services.values():
             if hasattr(service, "_openai_server_task") and service._openai_server_task:
                 service._openai_server_task.cancel()
-                
+        
         # Kill model-service processes
-        subprocess.run(["pkill", "-9", "model-service"])
-            
+        try:
+            subprocess.run(["pkill", "-9", "model-service"], check=False)
+        except Exception as e:
+            print(f"Error killing model-service processes: {e}")
+        
         # Close wandb runs
         for run in self._wandb_runs.values():
             try:
                 run.finish()
             except Exception:
                 pass
-            
+        
         # Clear references
         self._services.clear()
         self._wandb_runs.clear()
+        
+        # Remove self from global instances list
+        global _backend_instances
+        if self in _backend_instances:
+            _backend_instances.remove(self)
+            
+        print("LocalBackend cleanup completed")
+    
+    def __del__(self) -> None:
+        """
+        Destructor that ensures cleanup happens automatically when the object is garbage collected.
+        
+        This helps prevent hanging when scripts finish without explicitly calling down().
+        """
+        try:
+            self._cleanup_sync()
+        except Exception:
+            # Avoid errors during interpreter shutdown
+            pass
