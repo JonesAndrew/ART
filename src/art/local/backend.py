@@ -28,12 +28,24 @@ _backend_instances = []
 
 # Function to clean up all backends on exit
 def _cleanup_all_backends():
-    for backend in _backend_instances:
+    print(f"Cleaning up {len(_backend_instances)} backend instances...")
+    
+    # First, try to clean up each backend
+    for backend in list(_backend_instances):
         if hasattr(backend, "_cleanup_sync"):
             try:
                 backend._cleanup_sync()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error cleaning up backend: {e}")
+    
+    # As a last resort, kill all model-service processes
+    try:
+        subprocess.run(["pkill", "-9", "model-service"], check=False)
+    except Exception:
+        pass
+    
+    # Clear the global list
+    _backend_instances.clear()
 
 # Register cleanup on normal exit
 atexit.register(_cleanup_all_backends)
@@ -41,11 +53,19 @@ atexit.register(_cleanup_all_backends)
 # Set up signal handlers for SIGINT (Ctrl+C) and SIGTERM
 def _signal_handler(signum, frame):
     print(f"\nReceived signal {signum}, cleaning up...")
-    _cleanup_all_backends()
-    # Re-raise the signal to allow normal Python signal handling to continue
-    # (this ensures the default handler can still terminate the process)
-    signal.signal(signum, signal.SIG_DFL)
-    os.kill(os.getpid(), signum)
+    try:
+        # Kill all model-service processes immediately
+        subprocess.run(["pkill", "-9", "model-service"], check=False)
+        
+        # Then try the more graceful cleanup
+        _cleanup_all_backends()
+    except Exception as e:
+        print(f"Error during signal cleanup: {e}")
+    finally:
+        # Re-raise the signal to allow normal Python signal handling to continue
+        # (this ensures the default handler can still terminate the process)
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
 
 # Register signal handlers
 for sig in (signal.SIGINT, signal.SIGTERM):
@@ -422,67 +442,65 @@ class LocalBackend(Backend):
         This method ensures that all model services are stopped and child processes 
         are terminated properly, preventing hanging when a script finishes executing.
         """
-        await self._cleanup()
-        print("LocalBackend shut down successfully")
+        print("Shutting down LocalBackend...")
         
-    async def _cleanup(self) -> None:
-        """Internal cleanup method that can be called by both down() and __del__()"""
-        # Stop all openai servers first
-        for service in self._services.values():
-            if hasattr(service, "stop_openai_server"):
-                try:
-                    await service.stop_openai_server()
-                except Exception as e:
-                    print(f"Error stopping OpenAI server: {e}")
-        
-        # Kill all model-service processes
+        # First try to gracefully stop OpenAI servers if possible
         try:
-            subprocess.run(["pkill", "-9", "model-service"])
+            for service_name, service in list(self._services.items()):
+                if hasattr(service, "stop_openai_server"):
+                    try:
+                        await service.stop_openai_server()
+                        print(f"Stopped OpenAI server for {service_name}")
+                    except Exception as e:
+                        print(f"Error stopping OpenAI server for {service_name}: {e}")
         except Exception as e:
-            print(f"Error killing model-service processes: {e}")
+            print(f"Error shutting down services: {e}")
             
-        # Close all wandb runs
-        for run in self._wandb_runs.values():
-            try:
-                run.finish()
-            except Exception as e:
-                print(f"Error finishing wandb run: {e}")
+        # Then use the sync cleanup for the rest
+        self._cleanup_sync()
         
-        # Clear services and runs
-        self._services.clear()
-        self._wandb_runs.clear()
+        print("LocalBackend shut down successfully")
     
     def _cleanup_sync(self) -> None:
         """
         Synchronous cleanup method that can be called from signal handlers or at exit.
         """
         print("Performing synchronous cleanup of LocalBackend...")
-        # Cancel OpenAI server tasks
-        for service in self._services.values():
-            if hasattr(service, "_openai_server_task") and service._openai_server_task:
-                service._openai_server_task.cancel()
         
-        # Kill model-service processes
+        # We need to be very careful with service references as they might have unpicklable objects
+        # Don't interact with service objects directly - they can cause pickling errors
+        
+        # Kill model-service processes directly with pkill
+        # This is safer than trying to access service objects which might have unpicklable queues
         try:
             subprocess.run(["pkill", "-9", "model-service"], check=False)
         except Exception as e:
             print(f"Error killing model-service processes: {e}")
         
         # Close wandb runs
-        for run in self._wandb_runs.values():
-            try:
-                run.finish()
-            except Exception:
-                pass
+        try:
+            for run in list(self._wandb_runs.values()):
+                try:
+                    run.finish()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error finishing wandb runs: {e}")
         
-        # Clear references
-        self._services.clear()
-        self._wandb_runs.clear()
+        # Clear references (make a copy to avoid modifying during iteration)
+        try:
+            self._services = {}
+            self._wandb_runs = {}
+        except Exception as e:
+            print(f"Error clearing references: {e}")
         
         # Remove self from global instances list
-        global _backend_instances
-        if self in _backend_instances:
-            _backend_instances.remove(self)
+        try:
+            global _backend_instances
+            if self in _backend_instances:
+                _backend_instances.remove(self)
+        except Exception as e:
+            print(f"Error removing from global instances: {e}")
             
         print("LocalBackend cleanup completed")
     
