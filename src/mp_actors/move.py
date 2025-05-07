@@ -144,10 +144,23 @@ class Proxy:
             return asyncio.run(get_response(tuple(), dict()))
 
     def __del__(self) -> None:
-        self._handle_responses_task.cancel()
-        self._process.terminate()
-        self._responses.close()
-        self._requests.close()
+        try:
+            if hasattr(self, '_handle_responses_task'):
+                self._handle_responses_task.cancel()
+            if hasattr(self, '_process') and self._process.is_alive():
+                self._process.terminate()
+                # Make sure the process is terminated
+                self._process.join(timeout=1)
+                if self._process.is_alive():
+                    # If still alive, kill it forcefully
+                    self._process.kill()
+            if hasattr(self, '_responses'):
+                self._responses.close()
+            if hasattr(self, '_requests'):
+                self._requests.close()
+        except Exception:
+            # Avoid errors during interpreter shutdown
+            pass
 
 
 def _target(

@@ -379,3 +379,65 @@ class LocalBackend(Backend):
             delete=delete,
             art_path=self._path,
         )
+
+    async def down(self) -> None:
+        """
+        Shut down the LocalBackend by terminating all services and child processes.
+        
+        This method ensures that all model services are stopped and child processes 
+        are terminated properly, preventing hanging when a script finishes executing.
+        """
+        await self._cleanup()
+        print("LocalBackend shut down successfully")
+        
+    async def _cleanup(self) -> None:
+        """Internal cleanup method that can be called by both down() and __del__()"""
+        # Stop all openai servers first
+        for service in self._services.values():
+            if hasattr(service, "stop_openai_server"):
+                try:
+                    await service.stop_openai_server()
+                except Exception as e:
+                    print(f"Error stopping OpenAI server: {e}")
+        
+        # Kill all model-service processes
+        try:
+            subprocess.run(["pkill", "-9", "model-service"])
+        except Exception as e:
+            print(f"Error killing model-service processes: {e}")
+            
+        # Close all wandb runs
+        for run in self._wandb_runs.values():
+            try:
+                run.finish()
+            except Exception as e:
+                print(f"Error finishing wandb run: {e}")
+        
+        # Clear services and runs
+        self._services.clear()
+        self._wandb_runs.clear()
+    
+    def __del__(self) -> None:
+        """
+        Destructor that ensures cleanup happens automatically when the object is garbage collected.
+        
+        This helps prevent hanging when scripts finish without explicitly calling down().
+        """
+        # Need to run sync cleanup since we can't await in __del__
+        for service in self._services.values():
+            if hasattr(service, "_openai_server_task") and service._openai_server_task:
+                service._openai_server_task.cancel()
+                
+        # Kill model-service processes
+        subprocess.run(["pkill", "-9", "model-service"])
+            
+        # Close wandb runs
+        for run in self._wandb_runs.values():
+            try:
+                run.finish()
+            except Exception:
+                pass
+            
+        # Clear references
+        self._services.clear()
+        self._wandb_runs.clear()
