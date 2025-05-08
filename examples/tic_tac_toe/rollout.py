@@ -125,22 +125,22 @@ async def rollout(
 
     trajectory.metrics["num_moves"] = move_number
 
-    try:
-        op_client.update_log_metadata(
-            filters=[
-                {
-                    "field": "completionId",
-                    "equals": last_completion.id,
-                }
-            ],
-            metadata={
-                "reward": str(trajectory.reward),
-                "reward_assigned": "true",
-            },
-        )
-    except Exception as e:
-        print(f"Error updating log metadata: {e}")
+    # try:
+    #     op_client.update_log_metadata(
+    #         filters=[
+    #             {
+    #                 "field": "completionId",
+    #                 "equals": last_completion.id,
+    #             }
+    #         ],
+    #         metadata={
+    #             "reward": str(trajectory.reward),
+    #             "reward_assigned": "true",
+    #         },
+    #     )
+    # except Exception as e:
+    #     print(f"Error updating log metadata: {e}")
 
-        print(trajectory.reward)
+    #     print(trajectory.reward)
 
     return trajectory
