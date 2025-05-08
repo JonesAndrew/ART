@@ -44,7 +44,7 @@ def _kill_resource_trackers():
         except Exception:
             pass
     
-    # Try three approaches to find resource trackers
+    # Try multiple approaches to find resource trackers
     try:
         # 1. Use psutil to find direct children
         try:
@@ -57,15 +57,15 @@ def _kill_resource_trackers():
                         child.kill()
                 except Exception:
                     pass
-        except Exception as e:
-            print(f"Error using psutil to find resource trackers: {e}")
+        except Exception:
+            pass
             
         # 2. Use ps command to find related processes
         try:
             ps_output = subprocess.check_output(["ps", "-ef"], text=True)
             parent_pid = os.getpid()
             for line in ps_output.splitlines():
-                if str(parent_pid) in line and "resource_tracker" in line:
+                if "resource_tracker" in line:
                     try:
                         parts = line.split()
                         tracker_pid = int(parts[1])
@@ -73,8 +73,8 @@ def _kill_resource_trackers():
                         os.kill(tracker_pid, signal.SIGKILL)
                     except Exception:
                         pass
-        except Exception as e:
-            print(f"Error using ps to find resource trackers: {e}")
+        except Exception:
+            pass
             
         # 3. Use multiprocessing module's active_children
         try:
@@ -89,11 +89,27 @@ def _kill_resource_trackers():
                             child.kill()
                 except Exception:
                     pass
-        except Exception as e:
-            print(f"Error using mp.active_children to find resource trackers: {e}")
+        except Exception:
+            pass
             
-    except Exception as e:
-        print(f"Error during resource tracker cleanup: {e}")
+    except Exception:
+        pass
+        
+    # Try to clean up multiprocessing resources that might cause hanging
+    try:
+        # Directly close any open file descriptors
+        import gc
+        for obj in gc.get_objects():
+            if hasattr(obj, 'close') and (
+                'multiprocessing.connection' in str(type(obj)) or
+                'multiprocessing.queues' in str(type(obj))
+            ):
+                try:
+                    obj.close()
+                except:
+                    pass
+    except Exception:
+        pass
         
     # Last resort - try to kill the module itself
     try:
@@ -105,8 +121,8 @@ def _kill_resource_trackers():
                 rt._resource_tracker.close()
             # Make sure it doesn't restart
             rt._resource_tracker = None
-    except Exception as e:
-        print(f"Error shutting down resource tracker module: {e}")
+    except Exception:
+        pass
 
 # Set up a flag to track if we've done a final cleanup
 _final_cleanup_done = False
@@ -193,45 +209,89 @@ def _cleanup_all_backends():
     
     _final_cleanup_done = True
 
-# Add a watchdog thread that will force exit if the process is hanging
-def _force_exit_thread():
-    import time
-    import os
-    import sys
+# A helper function that performs thorough cleanup of multiprocessing resources
+def _perform_thorough_cleanup():
+    """
+    Performs a comprehensive cleanup of multiprocessing resources to allow normal exit.
+    """
+    print("Performing thorough cleanup to allow normal exit...")
     
-    # Wait for a timeout period after which we assume the process is hanging
-    time.sleep(10)  # Give normal cleanup 10 seconds to complete
+    # 1. Kill model-service processes
+    try:
+        subprocess.run(["pkill", "-9", "model-service"], check=False)
+    except Exception as e:
+        print(f"Error killing model-service processes: {e}")
+    
+    # 2. Kill resource trackers
+    try:
+        _kill_resource_trackers()
+    except Exception as e:
+        print(f"Error killing resource trackers: {e}")
+    
+    # 3. Cleanup multiprocessing module internal state
+    try:
+        # Try to access the internal state of multiprocessing module
+        import multiprocessing as mp
+        import gc
+        
+        # Explicitly close all pipe/queue/connection objects
+        for obj in gc.get_objects():
+            if hasattr(obj, 'close') and (
+                'multiprocessing.connection' in str(type(obj)) or
+                'multiprocessing.queues' in str(type(obj))
+            ):
+                try:
+                    obj.close()
+                except:
+                    pass
+    except Exception as e:
+        print(f"Error cleaning up multiprocessing objects: {e}")
+    
+    # 4. Join any non-daemon threads
+    try:
+        import threading
+        for thread in threading.enumerate():
+            if (thread is not threading.current_thread() and 
+                not thread.daemon and 
+                hasattr(thread, 'join')):
+                try:
+                    print(f"Joining thread: {thread.name}")
+                    thread.join(timeout=0.5)
+                except:
+                    pass
+    except Exception as e:
+        print(f"Error joining threads: {e}")
+    
+    print("Thorough cleanup completed")
+
+# Rather than forcing an exit, this thread now performs thorough cleanup
+def _cleanup_thread():
+    import time
+    
+    # Wait a bit to let normal cleanup occur
+    time.sleep(3)
     
     try:
-        # Try one final cleanup before exit
-        try:
-            subprocess.run(["pkill", "-9", "model-service"], check=False)
-            _kill_resource_trackers()
-        except:
-            pass
-        
-        # If we're still running after timeout, something is hung
-        print("\n=== WATCHDOG: Process appears to be hanging, forcing exit after training ===")
-        # Simply force exit the process
-        print("WATCHDOG: Invoking os._exit() to forcefully terminate the process")
-        os._exit(0)
+        # Perform thorough cleanup
+        _perform_thorough_cleanup()
+        print("Cleanup thread completed - script should exit naturally")
     except Exception as e:
-        print(f"Error in watchdog thread: {e}")
-        os._exit(1)
+        print(f"Error in cleanup thread: {e}")
 
-# Setup for the watchdog
-_exit_watchdog = None
+# Setup for cleanup thread
+_cleanup_thread_started = False
 
-def _start_exit_watchdog():
-    global _exit_watchdog
-    if _exit_watchdog is None or not _exit_watchdog.is_alive():
-        _exit_watchdog = threading.Thread(
-            target=_force_exit_thread,
-            daemon=True,
-            name="ExitWatchdog"
+def _start_cleanup_thread():
+    global _cleanup_thread_started
+    if not _cleanup_thread_started:
+        _cleanup_thread_started = True
+        cleanup_thread = threading.Thread(
+            target=_cleanup_thread,
+            daemon=True,  # Make it daemon so it won't prevent exit
+            name="CleanupThread"
         )
-        _exit_watchdog.start()
-        print("Started exit watchdog thread")
+        cleanup_thread.start()
+        print("Started cleanup thread")
 
 # Register cleanup on normal exit
 atexit.register(_cleanup_all_backends)
@@ -603,10 +663,6 @@ class LocalBackend(Backend):
             for k in {k for d in results for k in d}
         }
         self._log_metrics(model, data, "train", step_offset=-1)
-        
-        # After training completes, start the exit watchdog to ensure we don't hang
-        print("Training completed, starting exit watchdog")
-        _start_exit_watchdog()
 
     def _log_metrics(
         self,
@@ -690,6 +746,46 @@ class LocalBackend(Backend):
             delete=delete,
             art_path=self._path,
         )
+
+    async def cleanup_after_training(self) -> None:
+        """
+        Clean up resources after training to prevent hanging.
+        This can be called after a training session is complete, but won't interfere
+        with further training operations.
+        
+        This is less aggressive than down() and is focused on cleaning up resources
+        that might cause hanging while allowing the backend to continue functioning.
+        """
+        print("Cleaning up after training...")
+        
+        # Kill model-service processes
+        try:
+            subprocess.run(["pkill", "-9", "model-service"], check=False)
+        except Exception as e:
+            print(f"Error killing model-service processes: {e}")
+        
+        # Kill resource trackers
+        try:
+            _kill_resource_trackers()
+        except Exception as e:
+            print(f"Error killing resource trackers: {e}")
+        
+        # Try to clean up multiprocessing resources that might cause hanging
+        try:
+            import gc
+            for obj in gc.get_objects():
+                if hasattr(obj, 'close') and (
+                    'multiprocessing.connection' in str(type(obj)) or
+                    'multiprocessing.queues' in str(type(obj))
+                ):
+                    try:
+                        obj.close()
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Error cleaning up multiprocessing objects: {e}")
+            
+        print("Post-training cleanup completed")
 
     async def down(self) -> None:
         """
@@ -780,10 +876,47 @@ class LocalBackend(Backend):
         """
         Destructor that ensures cleanup happens automatically when the object is garbage collected.
         
-        This helps prevent hanging when scripts finish without explicitly calling down().
+        This is the key mechanism that prevents hanging when scripts finish without explicitly 
+        calling down(). When the backend object goes out of scope at the end of a script, this
+        method will be called to clean up resources.
         """
+        print("LocalBackend object going out of scope, performing automatic cleanup...")
         try:
-            self._cleanup_sync()
+            # Kill model-service processes
+            try:
+                subprocess.run(["pkill", "-9", "model-service"], check=False)
+            except Exception:
+                pass
+            
+            # Kill resource trackers
+            try:
+                _kill_resource_trackers()
+            except Exception:
+                pass
+                
+            # Close any open services or connections
+            try:
+                if hasattr(self, '_services'):
+                    self._services.clear()
+                if hasattr(self, '_wandb_runs'):
+                    for run in list(self._wandb_runs.values()):
+                        try:
+                            run.finish()
+                        except Exception:
+                            pass
+                    self._wandb_runs.clear()
+            except Exception:
+                pass
+                
+            # Remove self from global instances list
+            try:
+                global _backend_instances
+                if self in _backend_instances:
+                    _backend_instances.remove(self)
+            except Exception:
+                pass
+                
+            print("Automatic cleanup completed")
         except Exception:
             # Avoid errors during interpreter shutdown
             pass
