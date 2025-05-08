@@ -111,7 +111,10 @@ def _kill_resource_trackers():
 # Set up a flag to track if we've done a final cleanup
 _final_cleanup_done = False
 
-# Hook into asyncio.run to ensure we start the watchdog when it completes
+# Always start the watchdog at import time
+threading.Timer(30, lambda: os._exit(0)).start()
+
+# Also hook into asyncio.run to ensure we start an earlier watchdog when it completes
 original_asyncio_run = asyncio.run
 def _patched_asyncio_run(main, *, debug=None):
     try:
@@ -213,18 +216,13 @@ def _force_exit_thread():
     import sys
     
     # Wait for a timeout period after which we assume the process is hanging
-    time.sleep(10)  # Give normal cleanup 10 seconds to complete
+    time.sleep(5)  # Give normal cleanup 5 seconds to complete
     
     try:
         # If we're still running after timeout, something is hung
         print("\n=== WATCHDOG: Process appears to be hanging, forcing exit ===")
-        # Try one more desperate cleanup
-        subprocess.run(["pkill", "-9", "model-service"], check=False)
-        _kill_resource_trackers()
-        
+        # Simply force exit the process
         print("WATCHDOG: Invoking os._exit() to forcefully terminate the process")
-        
-        # Force exit the process after cleanup
         os._exit(0)
     except Exception as e:
         print(f"Error in watchdog thread: {e}")

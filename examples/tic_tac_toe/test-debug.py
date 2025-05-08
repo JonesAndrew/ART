@@ -167,38 +167,20 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
         print("asyncio.run completed - script should exit naturally")
-        print("Waiting 5 seconds to monitor post-completion state...")
-        time.sleep(5)  # Allow time to show the final state
+        print("Waiting 3 seconds to monitor post-completion state...")
+        time.sleep(3)  # Allow time to show the final state
         
         print("Debug after waiting:")
         print_thread_info()
         
-        print("Process still running after completion. Manually forcing exit...")
-        # Try to manually identify specific issues
-        subprocess.run(["pkill", "-9", "model-service"], check=False)
-        
-        # Look for resource tracker processes directly related to us
-        ps_output = subprocess.check_output(["ps", "-ef"], text=True)
-        parent_pid = os.getpid()
-        for line in ps_output.splitlines():
-            if f"{parent_pid}" in line and "resource_tracker" in line:
-                print(f"Found resource tracker: {line}")
-                try:
-                    parts = line.split()
-                    tracker_pid = int(parts[1])
-                    print(f"Killing resource tracker PID: {tracker_pid}")
-                    os.kill(tracker_pid, signal.SIGKILL)
-                except Exception as e:
-                    print(f"Error killing resource tracker: {e}")
-        
-        print("Forcing exit with os._exit(0)")
-        os._exit(0)  # Force exit
+        # IMPORTANT: Just use os._exit(0) to forcefully exit
+        # This will terminate the process immediately, regardless of any hanging threads
+        print("Force terminating with os._exit(0)")
+        os._exit(0)
         
     except KeyboardInterrupt:
         print("\nScript interrupted with KeyboardInterrupt")
-        print_thread_info()
-        sys.exit(1)
+        os._exit(1)
     except Exception as e:
         print(f"\nScript failed with error: {e}")
-        print_thread_info()
-        sys.exit(1)
+        os._exit(1)
