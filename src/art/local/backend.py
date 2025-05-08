@@ -111,25 +111,9 @@ def _kill_resource_trackers():
 # Set up a flag to track if we've done a final cleanup
 _final_cleanup_done = False
 
-# Always start the watchdog at import time
-threading.Timer(30, lambda: os._exit(0)).start()
+# We'll use a more targeted approach - only start the watchdog after training
 
-# Also hook into asyncio.run to ensure we start an earlier watchdog when it completes
-original_asyncio_run = asyncio.run
-def _patched_asyncio_run(main, *, debug=None):
-    try:
-        result = original_asyncio_run(main, debug=debug)
-        # Start watchdog when asyncio.run completes
-        _cleanup_all_backends()
-        _start_exit_watchdog()
-        return result
-    except Exception as e:
-        # Also ensure cleanup on exception
-        _cleanup_all_backends()
-        _start_exit_watchdog()
-        raise e
-# Replace asyncio.run with our patched version
-asyncio.run = _patched_asyncio_run
+# We don't need to patch asyncio.run as we'll handle watchdog specifically after training
 
 # Function to clean up all backends on exit
 def _cleanup_all_backends():
@@ -216,11 +200,18 @@ def _force_exit_thread():
     import sys
     
     # Wait for a timeout period after which we assume the process is hanging
-    time.sleep(5)  # Give normal cleanup 5 seconds to complete
+    time.sleep(10)  # Give normal cleanup 10 seconds to complete
     
     try:
+        # Try one final cleanup before exit
+        try:
+            subprocess.run(["pkill", "-9", "model-service"], check=False)
+            _kill_resource_trackers()
+        except:
+            pass
+        
         # If we're still running after timeout, something is hung
-        print("\n=== WATCHDOG: Process appears to be hanging, forcing exit ===")
+        print("\n=== WATCHDOG: Process appears to be hanging, forcing exit after training ===")
         # Simply force exit the process
         print("WATCHDOG: Invoking os._exit() to forcefully terminate the process")
         os._exit(0)
@@ -612,6 +603,10 @@ class LocalBackend(Backend):
             for k in {k for d in results for k in d}
         }
         self._log_metrics(model, data, "train", step_offset=-1)
+        
+        # After training completes, start the exit watchdog to ensure we don't hang
+        print("Training completed, starting exit watchdog")
+        _start_exit_watchdog()
 
     def _log_metrics(
         self,
