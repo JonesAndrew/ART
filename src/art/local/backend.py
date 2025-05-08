@@ -43,21 +43,97 @@ def _kill_resource_trackers():
         except Exception:
             pass
     
-    # Then try to find any resource tracker processes related to the current process
+    # Try three approaches to find resource trackers
     try:
-        current_process = psutil.Process(os.getpid())
-        for child in current_process.children(recursive=True):
-            try:
-                if "resource_tracker" in " ".join(child.cmdline()):
-                    print(f"Killing resource tracker child process: {child.pid}")
-                    child.kill()
-            except Exception:
-                pass
-    except Exception:
-        pass
+        # 1. Use psutil to find direct children
+        try:
+            current_process = psutil.Process(os.getpid())
+            for child in current_process.children(recursive=True):
+                try:
+                    cmdline = " ".join(child.cmdline())
+                    if "resource_tracker" in cmdline:
+                        print(f"Killing resource tracker child process (psutil): {child.pid}")
+                        child.kill()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error using psutil to find resource trackers: {e}")
+            
+        # 2. Use ps command to find related processes
+        try:
+            ps_output = subprocess.check_output(["ps", "-ef"], text=True)
+            parent_pid = os.getpid()
+            for line in ps_output.splitlines():
+                if str(parent_pid) in line and "resource_tracker" in line:
+                    try:
+                        parts = line.split()
+                        tracker_pid = int(parts[1])
+                        print(f"Killing resource tracker process (ps): {tracker_pid}")
+                        os.kill(tracker_pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Error using ps to find resource trackers: {e}")
+            
+        # 3. Use multiprocessing module's active_children
+        try:
+            import multiprocessing as mp
+            for child in mp.active_children():
+                try:
+                    if "resource_tracker" in child.name:
+                        print(f"Killing resource tracker process (mp): {child.pid}")
+                        child.terminate()
+                        child.join(timeout=0.5)
+                        if child.is_alive():
+                            child.kill()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error using mp.active_children to find resource trackers: {e}")
+            
+    except Exception as e:
+        print(f"Error during resource tracker cleanup: {e}")
+        
+    # Last resort - try to kill the module itself
+    try:
+        import multiprocessing.resource_tracker as rt
+        if hasattr(rt, "_resource_tracker") and rt._resource_tracker is not None:
+            print("Shutting down resource tracker module")
+            # Try to use its own shutdown
+            if hasattr(rt, "_resource_tracker") and hasattr(rt._resource_tracker, "close"):
+                rt._resource_tracker.close()
+            # Make sure it doesn't restart
+            rt._resource_tracker = None
+    except Exception as e:
+        print(f"Error shutting down resource tracker module: {e}")
+
+# Set up a flag to track if we've done a final cleanup
+_final_cleanup_done = False
+
+# Hook into asyncio.run to ensure we start the watchdog when it completes
+original_asyncio_run = asyncio.run
+def _patched_asyncio_run(main, *, debug=None):
+    try:
+        result = original_asyncio_run(main, debug=debug)
+        # Start watchdog when asyncio.run completes
+        _cleanup_all_backends()
+        _start_exit_watchdog()
+        return result
+    except Exception as e:
+        # Also ensure cleanup on exception
+        _cleanup_all_backends()
+        _start_exit_watchdog()
+        raise e
+# Replace asyncio.run with our patched version
+asyncio.run = _patched_asyncio_run
 
 # Function to clean up all backends on exit
 def _cleanup_all_backends():
+    global _final_cleanup_done
+    
+    if _final_cleanup_done:
+        return
+    
     print(f"Cleaning up {len(_backend_instances)} backend instances...")
     
     # First, try to clean up each backend
@@ -79,9 +155,108 @@ def _cleanup_all_backends():
     
     # Clear the global list
     _backend_instances.clear()
+    
+    # Try to cancel any remaining asyncio tasks
+    try:
+        import asyncio
+        if hasattr(asyncio, 'all_tasks'):
+            tasks = asyncio.all_tasks()
+            for task in tasks:
+                if not task.done() and not task.cancelled():
+                    task.cancel()
+    except Exception as e:
+        print(f"Error cancelling asyncio tasks: {e}")
+    
+    # Try to shutdown multiprocessing module gracefully 
+    try:
+        import multiprocessing as mp
+        if hasattr(mp, 'get_context'):
+            ctx = mp.get_context()
+            if hasattr(ctx, '_close_process_pool'):
+                ctx._close_process_pool()
+    except Exception as e:
+        print(f"Error shutting down multiprocessing: {e}")
+        
+    # Last resort - try to kill known multiprocessing internals directly
+    try:
+        # Try to kill the semaphore tracker
+        try:
+            import multiprocessing.semaphore_tracker as st
+            if hasattr(st, '_semaphore_tracker') and st._semaphore_tracker is not None:
+                if hasattr(st._semaphore_tracker, 'stop'):
+                    st._semaphore_tracker.stop()
+                st._semaphore_tracker = None
+                print("Shutdown semaphore tracker")
+        except Exception:
+            pass
+            
+        # Try to kill the forkserver
+        try:
+            import multiprocessing.forkserver as fs
+            if hasattr(fs, '_forkserver') and fs._forkserver is not None:
+                if hasattr(fs._forkserver, 'close'):
+                    fs._forkserver.close()
+                fs._forkserver = None
+                print("Shutdown fork server")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    
+    _final_cleanup_done = True
+
+# Add a watchdog thread that will force exit if the process is hanging
+def _force_exit_thread():
+    import time
+    import os
+    import sys
+    
+    # Wait for a timeout period after which we assume the process is hanging
+    time.sleep(10)  # Give normal cleanup 10 seconds to complete
+    
+    try:
+        # If we're still running after timeout, something is hung
+        print("\n=== WATCHDOG: Process appears to be hanging, forcing exit ===")
+        # Try one more desperate cleanup
+        subprocess.run(["pkill", "-9", "model-service"], check=False)
+        _kill_resource_trackers()
+        
+        print("WATCHDOG: Invoking os._exit() to forcefully terminate the process")
+        
+        # Force exit the process after cleanup
+        os._exit(0)
+    except Exception as e:
+        print(f"Error in watchdog thread: {e}")
+        os._exit(1)
+
+# Setup for the watchdog
+_exit_watchdog = None
+
+def _start_exit_watchdog():
+    global _exit_watchdog
+    if _exit_watchdog is None or not _exit_watchdog.is_alive():
+        _exit_watchdog = threading.Thread(
+            target=_force_exit_thread,
+            daemon=True,
+            name="ExitWatchdog"
+        )
+        _exit_watchdog.start()
+        print("Started exit watchdog thread")
 
 # Register cleanup on normal exit
 atexit.register(_cleanup_all_backends)
+
+# Special safety mechanism to ensure we don't hang on exit
+original_exit = sys.exit
+def _safe_exit(code=0):
+    # Trigger cleanup
+    _cleanup_all_backends()
+    # Start the watchdog to ensure we really exit
+    _start_exit_watchdog()
+    # Call original exit
+    original_exit(code)
+# Replace the builtin exit
+sys.exit = _safe_exit
 
 # Set up signal handlers for SIGINT (Ctrl+C) and SIGTERM
 def _signal_handler(signum, frame):
@@ -95,6 +270,9 @@ def _signal_handler(signum, frame):
         
         # Then try the more graceful cleanup
         _cleanup_all_backends()
+        
+        # Start watchdog to ensure we really exit
+        _start_exit_watchdog()
     except Exception as e:
         print(f"Error during signal cleanup: {e}")
     finally:
