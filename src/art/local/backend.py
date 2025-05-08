@@ -1,4 +1,5 @@
 from datetime import datetime
+import asyncio
 import atexit
 import json
 import math
@@ -391,16 +392,38 @@ class LocalBackend(Backend):
         global _resource_tracker_processes
         
         try:
-            # Find resource tracker processes related to the current process
-            current_process = psutil.Process(os.getpid())
-            for child in current_process.children(recursive=True):
-                try:
-                    cmdline = " ".join(child.cmdline())
-                    if "resource_tracker" in cmdline and child.pid not in _resource_tracker_processes:
-                        _resource_tracker_processes.append(child.pid)
-                        print(f"Tracking resource tracker process: {child.pid} ({cmdline})")
-                except Exception:
-                    pass
+            # Method 1: Find resource tracker processes using psutil
+            try:
+                current_process = psutil.Process(os.getpid())
+                for child in current_process.children(recursive=True):
+                    try:
+                        cmdline = " ".join(child.cmdline())
+                        if "resource_tracker" in cmdline and child.pid not in _resource_tracker_processes:
+                            _resource_tracker_processes.append(child.pid)
+                            print(f"Tracking resource tracker process: {child.pid} ({cmdline})")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"Error tracking resource trackers with psutil: {e}")
+                
+            # Method 2: Use ps command to find related processes
+            try:
+                ps_output = subprocess.check_output(["ps", "-ef"], text=True)
+                parent_pid = os.getpid()
+                for line in ps_output.splitlines():
+                    if str(parent_pid) in line and "resource_tracker" in line:
+                        try:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                tracker_pid = int(parts[1])
+                                if tracker_pid not in _resource_tracker_processes:
+                                    _resource_tracker_processes.append(tracker_pid)
+                                    print(f"Tracking resource tracker process (ps): {tracker_pid}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"Error tracking resource trackers with ps: {e}")
+                
         except Exception as e:
             print(f"Error tracking resource trackers: {e}")
 
