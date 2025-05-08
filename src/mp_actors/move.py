@@ -150,14 +150,36 @@ class Proxy:
             if hasattr(self, '_process') and self._process.is_alive():
                 self._process.terminate()
                 # Make sure the process is terminated
-                self._process.join(timeout=1)
-                if self._process.is_alive():
-                    # If still alive, kill it forcefully
-                    self._process.kill()
+                try:
+                    self._process.join(timeout=1)
+                    if self._process.is_alive():
+                        # If still alive, kill it forcefully
+                        self._process.kill()
+                        self._process.join(timeout=0.5)
+                except Exception:
+                    # If join fails, try to kill directly by PID
+                    try:
+                        import os
+                        import signal
+                        if hasattr(self._process, 'pid') and self._process.pid is not None:
+                            os.kill(self._process.pid, signal.SIGKILL)
+                    except Exception:
+                        pass
             if hasattr(self, '_responses'):
-                self._responses.close()
+                try:
+                    self._responses.close()
+                    # Also try to cancel any QueueFeederThread
+                    if hasattr(self._responses, '_thread') and self._responses._thread is not None:
+                        self._responses._thread.cancel()
+                except Exception:
+                    pass
             if hasattr(self, '_requests'):
-                self._requests.close()
+                try:
+                    self._requests.close()
+                    if hasattr(self._requests, '_thread') and self._requests._thread is not None:
+                        self._requests._thread.cancel()
+                except Exception:
+                    pass
         except Exception:
             # Avoid errors during interpreter shutdown
             pass

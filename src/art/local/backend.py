@@ -10,21 +10,51 @@ from art.utils.output_dirs import (
 )
 from art.utils.trajectory_logging import serialize_trajectory_groups
 from mp_actors import move_to_child_process
+import multiprocessing as mp
 import numpy as np
 import os
 import polars as pl
+import psutil
 import signal
 import subprocess
 import sys
+import threading
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from tqdm import auto as tqdm
-from typing import AsyncIterator, cast
+from typing import AsyncIterator, cast, List
 import wandb
 from wandb.sdk.wandb_run import Run
 
 # Track all backend instances to ensure cleanup on exit and signals
 _backend_instances = []
+
+# Track the resource tracker processes
+_resource_tracker_processes: List[int] = []
+
+# Function to find and kill resource tracker processes
+def _kill_resource_trackers():
+    # First try the ones we've tracked
+    global _resource_tracker_processes
+    for pid in _resource_tracker_processes:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            print(f"Killed tracked resource tracker process {pid}")
+        except Exception:
+            pass
+    
+    # Then try to find any resource tracker processes related to the current process
+    try:
+        current_process = psutil.Process(os.getpid())
+        for child in current_process.children(recursive=True):
+            try:
+                if "resource_tracker" in " ".join(child.cmdline()):
+                    print(f"Killing resource tracker child process: {child.pid}")
+                    child.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # Function to clean up all backends on exit
 def _cleanup_all_backends():
@@ -38,11 +68,14 @@ def _cleanup_all_backends():
             except Exception as e:
                 print(f"Error cleaning up backend: {e}")
     
-    # As a last resort, kill all model-service processes
+    # Force cleanup of resource tracker and model-service processes
     try:
+        # Kill model-service processes
         subprocess.run(["pkill", "-9", "model-service"], check=False)
-    except Exception:
-        pass
+        # Kill resource trackers
+        _kill_resource_trackers()
+    except Exception as e:
+        print(f"Error during final process cleanup: {e}")
     
     # Clear the global list
     _backend_instances.clear()
@@ -56,6 +89,9 @@ def _signal_handler(signum, frame):
     try:
         # Kill all model-service processes immediately
         subprocess.run(["pkill", "-9", "model-service"], check=False)
+        
+        # Kill resource trackers
+        _kill_resource_trackers()
         
         # Then try the more graceful cleanup
         _cleanup_all_backends()
@@ -158,11 +194,37 @@ class LocalBackend(Backend):
                 # When moving the service to a child process, import unsloth
                 # early to maximize optimizations
                 os.environ["IMPORT_UNSLOTH"] = "1"
+                
+                # Find any resource tracker processes that may exist before creating a new one
+                self._track_resource_trackers()
+                
                 self._services[model.name] = move_to_child_process(
                     self._services[model.name],
                     process_name="model-service",
                 )
+                
+                # Find and track new resource tracker processes that were created
+                self._track_resource_trackers()
+                
         return self._services[model.name]
+        
+    def _track_resource_trackers(self) -> None:
+        """Find and track resource tracker processes to ensure they get cleaned up."""
+        global _resource_tracker_processes
+        
+        try:
+            # Find resource tracker processes related to the current process
+            current_process = psutil.Process(os.getpid())
+            for child in current_process.children(recursive=True):
+                try:
+                    cmdline = " ".join(child.cmdline())
+                    if "resource_tracker" in cmdline and child.pid not in _resource_tracker_processes:
+                        _resource_tracker_processes.append(child.pid)
+                        print(f"Tracking resource tracker process: {child.pid} ({cmdline})")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error tracking resource trackers: {e}")
 
     def _get_packed_tensors(
         self,
@@ -476,6 +538,22 @@ class LocalBackend(Backend):
             subprocess.run(["pkill", "-9", "model-service"], check=False)
         except Exception as e:
             print(f"Error killing model-service processes: {e}")
+        
+        # Kill resource tracker processes
+        try:
+            _kill_resource_trackers()
+        except Exception as e:
+            print(f"Error killing resource trackers: {e}")
+            
+        # Attempt to clean up asyncio threads
+        try:
+            import asyncio
+            # Try to cancel any asyncio tasks
+            for task in asyncio.all_tasks() if hasattr(asyncio, 'all_tasks') else []:
+                if not task.done():
+                    task.cancel()
+        except Exception as e:
+            print(f"Error canceling asyncio tasks: {e}")
         
         # Close wandb runs
         try:
