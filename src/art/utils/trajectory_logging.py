@@ -30,6 +30,7 @@ def trajectory_group_to_dict(trajectory_group: TrajectoryGroup) -> dict[str, Any
             continue
         trajectory_dicts.append(trajectory_to_dict(trajectory))
     print(trajectory_dicts)
+    print(json.dumps(trajectory_dicts))
     return {
         "trajectories": trajectory_dicts,
     }
