@@ -336,6 +336,7 @@ class LocalBackend(Backend):
         service = await self._get_service(model)
         if verbose:
             print("Logging training data to disk...")
+            print(trajectory_groups)
         await self._log(model, trajectory_groups, "train")
         if verbose:
             print("Packing tensors...")
