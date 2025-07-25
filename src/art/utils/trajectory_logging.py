@@ -68,11 +68,13 @@ def trajectory_to_dict(trajectory: Trajectory) -> dict[str, Any]:
 
 def message_or_choice_to_dict(message_or_choice: Message | Choice) -> dict[str, Any]:
     # messages are sometimes stored as dicts, so we need to handle both cases
+    print(message_or_choice)
     item_dict = (
         message_or_choice
         if isinstance(message_or_choice, dict)
-        else message_or_choice.to_dict()
+        else message_or_choice.to_dict(mode="json")
     )
+    print(item_dict)
 
     if "logprobs" in item_dict:
         # item is a choice with logprobs, remove the logprobs
