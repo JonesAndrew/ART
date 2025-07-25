@@ -29,7 +29,7 @@ def trajectory_group_to_dict(trajectory_group: TrajectoryGroup) -> dict[str, Any
             # remove exceptions
             continue
         trajectory_dicts.append(trajectory_to_dict(trajectory))
-
+    print(trajectory_dicts)
     return {
         "trajectories": trajectory_dicts,
     }
