@@ -15,6 +15,8 @@ from vllm.utils import FlexibleArgumentParser
 
 from ..dev.openai_server import OpenAIServerConfig
 
+import msgspec
+from typing import Optional
 
 async def openai_server_task(
     engine: EngineClient,
@@ -50,17 +52,29 @@ async def openai_server_task(
     # Patch engine.add_lora; hopefully temporary
     add_lora = engine.add_lora
 
+    class LoRARequestPlus(msgspec.Struct,
+            omit_defaults=True,  # type: ignore[call-arg]
+            array_like=True):  # type: ignore[call-arg]
+        lora_name: str
+        lora_int_id: int
+        lora_path: str = ""
+        lora_local_path: Optional[str] = msgspec.field(default=None)
+        long_lora_max_len: Optional[int] = None
+        base_model_name: Optional[str] = msgspec.field(default=None)
+        tensorizer_config_dict: Optional[dict] = None
+        lora_tensors: Optional[str] = msgspec.field(default=None)
+
+    def struct_to_dict(obj):
+        return {field: getattr(obj, field) for field in obj.__struct_fields__}
+
     async def _add_lora(lora_request) -> None:
-        class LoRARequest:
-            def __getattr__(self, name: str) -> Any:
-                if name == "lora_tensors" and not hasattr(lora_request, name):
-                    return None
-                return getattr(lora_request, name)
-
-            def __setattr__(self, name: str, value: Any) -> None:
-                setattr(lora_request, name, value)
-
-        await add_lora(LoRARequest())  # type: ignore
+        #raise TypeError(type(lora_request))
+        #print("lora_tensors", lora_request.lora_tensors)
+        #if not hasattr(lora_request, "lora_tensors"):
+        #    setattr(lora_request, "lora_tensors", None)
+        #print("lora_tensors", lora_request.lora_tensors)
+        a = LoRARequestPlus(**struct_to_dict(lora_request))
+        await add_lora(a)
 
     engine.add_lora = _add_lora
 

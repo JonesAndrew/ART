@@ -252,16 +252,17 @@ class DecoupledUnslothService:
         else:
             init_args["model_name"] = self.base_model
 
+        print("using fast model")
         model, tokenizer = cast(
             tuple[CausalLM, PreTrainedTokenizerBase],
-            unsloth.FastLanguageModel.from_pretrained(**init_args),
+            unsloth.FastModel.from_pretrained(**init_args),
         )
 
         # Initialize PEFT model
         peft_model = cast(
             peft.peft_model.PeftModelForCausalLM,
-            unsloth.FastLanguageModel.get_peft_model(
-                model, **self.config.get("peft_args", {})
+            unsloth.FastModel.get_peft_model(
+                model, r = 16, target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"], lora_alpha = 64, use_gradient_checkpointing = "unsloth", random_state = 3407
             ),
         )
 
@@ -328,9 +329,10 @@ def sleep(*, level: int, pids_path: str, profile: bool) -> None:
     try:
         if not (profile and worker.rank == 0):
             logger.setLevel(logging.CRITICAL)
-        setattr(allocator, "_override_tags", {"weights", "kv_cache"})
-        with worker.time("sleep"):
-            worker.sleep(level)
+        #setattr(allocator, "_override_tags", {"weights", "kv_cache"})
+        #with worker.time("sleep"):
+            #worker.sleep(level)
+          #  pass
         with open(pids_path, "a") as f:
             f.write(f"{os.getpid()}\n")
 
@@ -338,8 +340,9 @@ def sleep(*, level: int, pids_path: str, profile: bool) -> None:
         while os.path.exists(pids_path):
             time.sleep(1)
 
-        with worker.time("wake_up"):
-            worker.wake_up()
+        #with worker.time("wake_up"):
+            #worker.wake_up()
+         #   pass
     finally:
         logger.setLevel(logging.INFO)
-        delattr(allocator, "_override_tags")
+        #delattr(allocator, "_override_tags")
